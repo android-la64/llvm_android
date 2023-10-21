@@ -457,6 +457,7 @@ class AndroidConfig(_BaseConfig):
             hosts.Arch.AARCH64: 'arm64',
             hosts.Arch.I386: 'x86',
             hosts.Arch.X86_64: 'x86_64',
+            hosts.Arch.LoongArch64: 'loongarch64',
         }[self.target_arch]
 
     @property
@@ -492,6 +493,8 @@ class AndroidConfig(_BaseConfig):
         cflags.append(f'-B{toolchain_bin}')
         cflags.append('-ffunction-sections')
         cflags.append('-fdata-sections')
+        if self.ndk_arch == 'LoongArch64':
+            cflags.append('-mno-relax')
         return cflags
 
     @property
@@ -512,6 +515,8 @@ class AndroidConfig(_BaseConfig):
     @property
     def cxxflags(self) -> List[str]:
         cxxflags = super().cxxflags
+        if self.ndk_arch == 'LoongArch64':
+            cxxflags.append('-mno-relax')
         if self.platform:
             # For the NDK, the sysroot has the C++ headers, but for the
             # platform, we need to add the headers manually.
@@ -585,6 +590,15 @@ class AndroidI386Config(AndroidConfig):
         return cflags
 
 
+class AndroidLoongArch64Config(AndroidConfig):
+    """Configs for android LoongArch64 targets."""
+    target_arch: hosts.Arch = hosts.Arch.LoongArch64
+    ## TODO: need real path
+    _toolchain_path: Path = Path('loongarch64/loongarch64-linux-android-8.3/loongarch64-linux-android')
+    _toolchain_lib: Path = (paths.NDK_BASE / 'toolchains' / 'loongarch64-8.3' / 'prebuilt' /
+                           'linux-x86_64' / 'loongarch64-linux-android' / 'lib')
+
+
 def host_config(musl: bool=False) -> Config:
     """Returns the Config matching the current machine."""
     return {
@@ -604,6 +618,7 @@ def android_configs(platform: bool=True,
         AndroidAArch64Config(),
         AndroidI386Config(),
         AndroidX64Config(),
+        AndroidLoongArch64Config(),
     ]
     for config in configs:
         config.static = static

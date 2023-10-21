@@ -403,6 +403,9 @@ class CompilerRTBuilder(base_builders.LLVMRuntimeBuilder):
         # lib/android instead of lib/linux.
         del defines['CMAKE_SYSTEM_NAME']
         libs: List[str] = []
+        arch = self._config.target_arch
+        if arch == hosts.Arch.LoongArch64:
+            defines['CMAKE_SIZEOF_VOID_P'] = 8
         if self._config.api_level < 21:
             libs += ['-landroid_support']
         # Currently, -rtlib=compiler-rt (even with -unwindlib=libunwind) does
@@ -421,7 +424,9 @@ class CompilerRTBuilder(base_builders.LLVMRuntimeBuilder):
     @property
     def cflags(self) -> List[str]:
         cflags = super().cflags
+        # arch = self._config.target_arch
         cflags.append('-funwind-tables')
+        cflags.append("-lm")
         return cflags
 
     def install_config(self) -> None:
@@ -834,6 +839,7 @@ class LldbServerBuilder(base_builders.LLVMRuntimeBuilder):
             hosts.Arch.AARCH64: 'AArch64',
             hosts.Arch.I386: 'X86',
             hosts.Arch.X86_64: 'X86',
+            hosts.Arch.LoongArch64: 'LoongArch',
         }[self._config.target_arch]
 
     @property
@@ -964,6 +970,7 @@ class DeviceSysrootsBuilder(base_builders.Builder):
             platform_stubs = paths.OUT_DIR / 'platform_stubs' / config.ndk_arch
             platform_stubs.mkdir(parents=True, exist_ok=True)
             libdir = sysroot / 'usr' / 'lib'
+            relax = '-mno-relax' if arch == hosts.Arch.LoongArch64 else ''
             libdir.mkdir(parents=True, exist_ok=True)
             with (platform_stubs / 'libc++.c').open('w') as f:
                 f.write(textwrap.dedent("""\
@@ -980,6 +987,7 @@ class DeviceSysrootsBuilder(base_builders.Builder):
             utils.check_call([self.toolchain.cc,
                               f'--target={config.llvm_triple}',
                               '-fuse-ld=lld', '-nostdlib', '-shared',
+                              relax,
                               '-Wl,-soname,libc++.so',
                               '-o{}'.format(libdir / 'libc++.so'),
                               str(platform_stubs / 'libc++.c')])
@@ -1044,6 +1052,8 @@ class LibCxxBuilder(base_builders.LLVMRuntimeBuilder):
         defines['LIBCXXABI_ENABLE_NEW_DELETE_DEFINITIONS'] = 'OFF'
         defines['LIBCXX_CXX_ABI'] = 'libcxxabi'
         defines['LIBCXX_HAS_WIN32_THREAD_API'] = 'ON'
+        defines['LIBCXXABI_ENABLE_THREADS'] = 'ON'
+        defines['LIBCXXABI_HAS_PTHREAD_API'] = 'ON'
         defines['LIBCXX_TEST_COMPILER_FLAGS'] = defines['CMAKE_CXX_FLAGS']
         defines['LIBCXX_TEST_LINKER_FLAGS'] = defines['CMAKE_EXE_LINKER_FLAGS']
         defines['LIBCXX_TARGET_TRIPLE'] = self._config.llvm_triple
