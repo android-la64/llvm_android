@@ -534,7 +534,7 @@ class AndroidConfig(_BaseConfig):
             return 29
         if self.target_arch in [hosts.Arch.ARM, hosts.Arch.I386]:
             return 19
-        return 21
+        return 29
 
     def __str__(self) -> str:
         return (f'{self.target_os.name}-{self.target_arch.name} ' +
