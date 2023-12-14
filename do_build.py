@@ -172,8 +172,8 @@ def build_runtimes(build_lldb_server: bool):
     builders.BuiltinsBuilder().build()
     builders.LibUnwindBuilder().build()
     builders.PlatformLibcxxAbiBuilder().build()
-    # builders.CompilerRTBuilder().build()
-    # builders.TsanBuilder().build()
+    builders.CompilerRTBuilder().build()
+    builders.TsanBuilder().build()
     # Build musl runtimes and 32-bit glibc for Linux
     if hosts.build_host().is_linux:
         builders.CompilerRTHostI386Builder().build()
@@ -185,7 +185,7 @@ def build_runtimes(build_lldb_server: bool):
     # Bug: http://b/64037266. `strtod_l` is missing in NDK r15. This will break
     # libcxx build.
     # build_libcxx(toolchain, version)
-    # builders.SanitizerMapFileBuilder().build()
+    builders.SanitizerMapFileBuilder().build()
 
 
 def install_wrappers(llvm_install_path: Path, llvm_next=False) -> None:
