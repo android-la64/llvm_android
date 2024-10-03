@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
 
 import android_version
@@ -28,11 +27,6 @@ import configs
 import hosts
 import paths
 import utils
-
-def logger():
-    """Returns the module level logger."""
-    return logging.getLogger(__name__)
-
 
 def build_llvm() -> builders.Stage2Builder:
     host_configs = [configs.host_config()]
@@ -52,12 +46,8 @@ def build_llvm() -> builders.Stage2Builder:
     stage2.enable_assertions = True
     stage2.lto = False
     stage2.build_lldb = False
-    stage2.ninja_targets = ['all', 'UnitTests', '-k', '100']
-    try:
-        stage2.build()
-    except subprocess.CalledProcessError:
-        # Ok to fail
-        logger().info('stage2.build() failed, but it\'s ok')
+    stage2.ninja_targets = ['all', 'UnitTests']
+    stage2.build()
     return stage2
 
 # runextractor is expected to fail on these sources.
@@ -78,7 +68,7 @@ def build_kythe_corpus(builder: builders.Stage2Builder) -> None:
     env = {
         'KYTHE_OUTPUT_DIRECTORY': kythe_out_dir,
         'KYTHE_ROOT_DIRECTORY': paths.ANDROID_DIR,
-        'KYTHE_CORPUS': 'android.googlesource.com/toolchain/llvm-project//main',
+        'KYTHE_CORPUS': 'android.googlesource.com/toolchain/llvm-project//master-legacy',
         'KYTHE_VNAMES': paths.KYTHE_VNAMES_JSON
     }
 
@@ -122,8 +112,7 @@ def package(build_name: str) -> None:
     utils.check_call(['build/soong/soong_ui.bash',
                       '--build-mode', '--all-modules',
                       f'--dir={paths.ANDROID_DIR}',
-                      '-k', 'TARGET_RELEASE=trunk_staging',
-                      'merge_zips'])
+                      '-k', 'merge_zips'])
     merge_zips_path = (paths.OUT_DIR / 'host' / hosts.build_host().os_tag /
                        'bin' / 'merge_zips')
 

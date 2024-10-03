@@ -248,7 +248,7 @@ class DarwinConfig(_BaseConfig):
     @property
     def cflags(self) -> List[str]:
         cflags = super().cflags
-        # Fails if an API used is newer than what specified in -mmacos-version-min.
+        # Fails if an API used is newer than what specified in -mmacosx-version-min.
         cflags.append('-Werror=unguarded-availability')
         return cflags
 
@@ -310,6 +310,13 @@ class LinuxConfig(_GccConfig):
     def cflags(self) -> List[str]:
         cflags = super().cflags
         if self.is_32_bit and not self.is_musl:
+            # compiler-rt/lib/gwp_asan uses PRIu64 and similar format-specifier macros.
+            # Add __STDC_FORMAT_MACROS so their definition gets included from
+            # inttypes.h.  This explicit flag is only needed here.  64-bit host runtimes
+            # are built in stage1/stage2 and get it from the LLVM CMake configuration.
+            # These are defined unconditionaly in bionic and newer glibc
+            # (https://sourceware.org/git/gitweb.cgi?p=glibc.git;h=1ef74943ce2f114c78b215af57c2ccc72ccdb0b7)
+            cflags.append('-D__STDC_FORMAT_MACROS')
             cflags.append('-march=i686')
         return cflags
 
@@ -404,9 +411,6 @@ class LinuxMuslConfig(LinuxConfig):
         defines['LIBCXX_USE_COMPILER_RT'] = 'TRUE'
         defines['LIBCXXABI_USE_COMPILER_RT'] = 'TRUE'
         defines['LIBUNWIND_USE_COMPILER_RT'] = 'TRUE'
-        # clang generates call to builtin functions when building
-        # compiler-rt for musl.  Allow use of the builtins library.
-        defines['COMPILER_RT_USE_BUILTINS_LIBRARY'] = 'TRUE'
 
         # The musl sysroots contain empty libdl.a, libpthread.a and librt.a to
         # satisfy the parts of the LLVM build that hardcode -lpthread, etc.,
@@ -564,18 +568,13 @@ class AndroidConfig(_BaseConfig):
 
     static: bool = False
     platform: bool = False
+    suppress_libcxx_headers: bool = False
     override_api_level: Optional[int] = None
 
     @property
     def base_llvm_triple(self) -> str:
         """Get base LLVM triple (without API level)."""
-        if self.target_arch == hosts.Arch.ARM:
-            # AndroidARMConfig specifies a "-march=armv7-a" cflag, but including
-            # armv7a in the triple is necessary to build libc++ tests correctly,
-            # which do not allow adding arbitrary cflags.
-            return 'armv7a-linux-androideabi'
-        else:
-            return f'{self.target_arch.llvm_arch}-linux-android'
+        return f'{self.target_arch.llvm_arch}-linux-android'
 
     @property
     def llvm_triple(self) -> str:
@@ -591,7 +590,6 @@ class AndroidConfig(_BaseConfig):
             hosts.Arch.I386: 'x86',
             hosts.Arch.RISCV64: 'riscv64',
             hosts.Arch.X86_64: 'x86_64',
-            hosts.Arch.LoongArch64: 'LoongArch',
         }[self.target_arch]
 
     @property
@@ -617,9 +615,6 @@ class AndroidConfig(_BaseConfig):
         ldflags.append('-pie')
         if self.static:
             ldflags.append('-static')
-        if (self.target_arch == hosts.Arch.X86_64 or
-                self.target_arch == hosts.Arch.AARCH64):
-            ldflags.append('-Wl,-z,max-page-size=16384')
         return ldflags
 
     @property
@@ -633,16 +628,38 @@ class AndroidConfig(_BaseConfig):
 
         cflags.append('-ffunction-sections')
         cflags.append('-fdata-sections')
-        if (self.target_arch == hosts.Arch.X86_64 or
-                self.target_arch == hosts.Arch.AARCH64):
-            cflags.append('-D__BIONIC_NO_PAGE_SIZE_MACRO')
         return cflags
+
+    @property
+    def _libcxx_header_dirs(self) -> List[Path]:
+        # For the NDK, the sysroot has the C++ headers.
+        assert self.platform
+        if self.suppress_libcxx_headers:
+            return []
+        # <prebuilts>/include/c++/v1 includes the cxxabi headers
+        return [
+            paths.CLANG_PREBUILT_LIBCXX_HEADERS,
+            # The platform sysroot also has Bionic headers from an NDK release,
+            # but override them with the current headers.
+            paths.BIONIC_HEADERS,
+            paths.BIONIC_KERNEL_HEADERS,
+        ]
+
+    @property
+    def cxxflags(self) -> List[str]:
+        cxxflags = super().cxxflags
+        if self.platform:
+            # For the NDK, the sysroot has the C++ headers, but for the
+            # platform, we need to add the headers manually.
+            cxxflags.append('-nostdinc++')
+            cxxflags.extend(f'-isystem {d}' for d in self._libcxx_header_dirs)
+        return cxxflags
 
     @property
     def api_level(self) -> int:
         if self.override_api_level:
             return self.override_api_level
-        if self.target_arch == hosts.Arch.RISCV64 or self.target_arch == hosts.Arch.LoongArch64:
+        if self.target_arch == hosts.Arch.RISCV64:
             return 35
         if self.static or self.platform:
             # Set API level for platform to to 30 since these runtimes can be
@@ -685,17 +702,6 @@ class AndroidAArch64Config(AndroidConfig):
         cflags.append('-mbranch-protection=standard')
         return cflags
 
-class AndroidLoongarch64Config(AndroidConfig):
-    """Configs for android LoongArch64 targets."""
-    target_arch: hosts.Arch = hosts.Arch.LoongArch64
-    _toolchain_path: Optional[Path] = None
-
-    @property
-    def cflags(self) -> List[str]:
-        cflags = super().cflags
-        cflags.append(f'-isystem {self.sysroot}/usr/include/{self.ndk_sysroot_triple}')
-
-        return cflags
 
 class AndroidRiscv64Config(AndroidConfig):
     """Configs for android riscv64 targets."""
@@ -749,6 +755,7 @@ def host_32bit_config(musl: bool=False) -> Config:
 
 def android_configs(platform: bool=True,
                     static: bool=False,
+                    suppress_libcxx_headers: bool=False,
                     extra_config=None) -> List[Config]:
     """Returns a list of configs for android builds."""
     configs = [
@@ -757,11 +764,11 @@ def android_configs(platform: bool=True,
         AndroidI386Config(),
         AndroidX64Config(),
         AndroidRiscv64Config(),
-        AndroidLoongarch64Config(),
     ]
     for config in configs:
         config.static = static
         config.platform = platform
+        config.suppress_libcxx_headers = suppress_libcxx_headers
         config.extra_config = extra_config
     # List is not covariant. Explicit convert is required to make it List[Config].
     return list(configs)

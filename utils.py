@@ -23,7 +23,6 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
-import sys
 from typing import Dict, List
 
 import constants
@@ -65,21 +64,17 @@ def check_output(cmd, *args, **kwargs):
 def create_tarball(source_dir, input, output):
     xz_env = os.environ.copy()
     xz_env["XZ_OPT"] = "-T0"
-    check_call([
+    subprocess.run([
         'tar', '-cJC', str(source_dir),
-        '-f', str(output),
-        *map(str, input)
+        *map(str, input),
+        '-f', str(output)
     ], env=xz_env)
-    # print sha of tarball for debugging
-    check_call(['shasum', str(output)])
 
 
 def extract_tarball(output_dir, input, args=[]):
     xz_env = os.environ.copy()
     xz_env["XZ_OPT"] = "-T0"
-    # print sha of tarball for debugging
-    check_call(['shasum', str(input)])
-    check_call(['tar', '-xC', str(output_dir), '-f', str(input)] + args, env=xz_env)
+    subprocess.run(['tar', '-xC', str(output_dir), '-f', str(input)] + args, env=xz_env)
 
 
 def is_available_mac_ver(ver: str) -> bool:
@@ -107,7 +102,7 @@ def create_script(script_path: Path, cmd: List[str], env: Dict[str, str]) -> Non
         for k, v in env.items():
             if v != ORIG_ENV.get(k):
                 outf.write(f'export {k}="{v}"\n')
-        outf.write(list2cmdline(cmd) + ' "$@"\n')
+        outf.write(list2cmdline(cmd) + ' $@\n')
     script_path.chmod(0o755)
 
 
@@ -160,49 +155,7 @@ def clean_out_dir():
     for child in paths.OUT_DIR.iterdir():
         if child.name == 'prebuilt_cached':
             continue
-        logger().info(f'removing {child} in {paths.OUT_DIR}')
         if child.is_dir():
             shutil.rmtree(child)
         else:
             child.unlink()
-
-
-def check_gsutil():
-    cmd = ['gsutil', 'version']
-    try:
-        subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        return True
-    except FileNotFoundError:
-        return False
-
-
-def check_stubby():
-    cmd = ['stubby', '--version']
-    try:
-        subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        return True
-    except FileNotFoundError:
-        return False
-
-
-def check_tools(use_sha: bool):
-    if not check_gsutil():
-        print(
-            'Fatal: gsutil not installed! Please go to'
-            ' https://cloud.google.com/storage/docs/gsutil_install to install'
-            ' gsutil',
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if use_sha and not check_stubby():
-        print(
-            'Fatal: stubby not found. This is only available on gLinux'
-            ' (Googlers only). Use --build_id instead',
-            file=sys.stderr,
-        )
-        sys.exit(1)

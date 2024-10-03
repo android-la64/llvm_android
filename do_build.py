@@ -24,7 +24,7 @@ import os
 import shutil
 import sys
 import textwrap
-from typing import List, Optional, Set
+from typing import List, NamedTuple, Optional, Set, Tuple
 import re
 
 import android_version
@@ -35,10 +35,10 @@ import configs
 import hosts
 import paths
 import source_manager
-import toolchain_errors
 import timer
 import toolchains
 import utils
+from version import Version
 import win_sdk
 
 def logger():
@@ -204,7 +204,6 @@ def build_runtimes(build_lldb_server: bool,
     builders.LibUnwindBuilder().build()
     builders.DeviceLibcxxBuilder().build()
     builders.CompilerRTBuilder().build()
-    builders.DeviceLibcxxBuilder(builders.DeviceLibcxxBuilder.hwasan_config_list).build()
     builders.TsanBuilder().build()
     # Build musl runtimes and 32-bit glibc for Linux
     if hosts.build_host().is_linux:
@@ -333,7 +332,6 @@ def bolt_optimize(toolchain_builder: LLVMBuilder, clang_fdata: Path):
         '-icf=1', '--use-gnu-stack', clang_bin_orig
     ]
     utils.check_call(args)
-    os.remove(clang_bin_orig)
 
 
 def bolt_instrument(toolchain_builder: LLVMBuilder):
@@ -618,7 +616,7 @@ def package_toolchain(toolchain_builder: LLVMBuilder,
         get_scripts_sha = re.findall(r'name="toolchain/llvm_android" revision="(.*)" /',
                                      manifest_context)[0]
     else:
-        get_scripts_sha = 'refs/heads/main'
+        get_scripts_sha = 'refs/heads/master'
     with open(clang_source_info_file, 'r') as info:
         info_read = info.read()
     with open(clang_source_info_file, 'w') as info:
@@ -652,7 +650,6 @@ def package_toolchain(toolchain_builder: LLVMBuilder,
                         srcs = glob([
                             "bin/*",
                             "lib/*",
-                            "lib/x86_64-unknown-linux-gnu/*",
                         ]),
                     )
 
@@ -660,8 +657,6 @@ def package_toolchain(toolchain_builder: LLVMBuilder,
                         name = "includes",
                         srcs = glob([
                             "lib/clang/*/include/**",
-                            "include/c++/**",
-                            "include/x86_64-unknown-linux-gnu/c++/**",
                         ]),
                     )
 
@@ -824,12 +819,6 @@ def parse_args():
         help='Skip applying local patches. This allows building a vanilla upstream version.')
 
     parser.add_argument(
-        '--continue-on-errors',
-        action='store_true',
-        default=False,
-        help='Continue build on error. This allows catching all errors at once.')
-
-    parser.add_argument(
         '--create-tar',
         action='store_true',
         default=False,
@@ -881,12 +870,6 @@ def parse_args():
         help='Skip building the bootstrap compiler and use the prebuilt instead.')
 
     parser.add_argument(
-        '--package-stage2-install',
-        action='store_true',
-        default=False,
-        help='Package stage2-install')
-
-    parser.add_argument(
         '--mlgo',
         action='store_true',
         default=False,
@@ -916,13 +899,6 @@ def parse_args():
                         using toolchain/llvm-project (SHA or \'main\')')
 
     parser.add_argument(
-        "--git_am",
-        action="store_true",
-        default=False,
-        help="If set, use 'git am' to patch instead of GNU 'patch'. ",
-    )
-
-    parser.add_argument(
         '--windows-sdk',
         help='Path to a Windows SDK. If set, it will be used instead of MinGW.'
     )
@@ -944,14 +920,20 @@ def parse_args():
     incremental_group.add_argument(
         '--incremental',
         action='store_true',
-        default=True,
+        default=False,
         help='Keep paths.OUT_DIR if it exists')
     incremental_group.add_argument(
         '--no-incremental',
         action='store_false',
-        default=True,
+        default=False,
         dest='incremental',
-        help='Delete paths.OUT_DIR if it exists (default)')
+        help='Delete paths.OUT_DIR if it exists')
+
+    parser.add_argument(
+        '--sccache',
+        action='store_true',
+        default=False,
+        help='Use sccache to speed up development builds. (Do not use for release builds)')
 
     return parser.parse_args()
 
@@ -965,8 +947,7 @@ def main():
             logger().info(f'Removing {paths.OUT_DIR}')
             utils.clean_out_dir()
         else:
-            out_dir_items = ' '.join(map(str, paths.OUT_DIR.iterdir()))
-            logger().info(f'Keeping older build in {paths.OUT_DIR}: {out_dir_items}')
+            logger().info(f'Keeping older build in {paths.OUT_DIR}')
 
     timer.Timer.register_atexit(paths.DIST_DIR / 'build_times.txt')
 
@@ -987,6 +968,7 @@ def main():
     build_lldb = 'lldb' not in args.no_build
     mlgo = args.mlgo
     musl = args.musl
+    sccache = args.sccache
 
     host_configs = [configs.host_config(musl)]
 
@@ -1014,20 +996,12 @@ def main():
     else:
         logger().info('Tensorflow found: ' + paths.get_tensorflow_path())
 
-    build_errors : List[toolchain_errors.ToolchainError] = []
     # Clone sources to be built and apply patches.
     if not args.skip_source_setup:
-        setup_source_result = source_manager.setup_sources(git_am=args.git_am,
-                                         llvm_rev=args.llvm_rev,
-                                         skip_apply_patches=args.skip_apply_patches,
-                                         continue_on_patch_errors=args.continue_on_errors)
-        if setup_source_result:
-            build_errors.append(setup_source_result)
+        source_manager.setup_sources(llvm_rev=args.llvm_rev, skip_apply_patches=args.skip_apply_patches)
 
     # Build the stage1 Clang for the build host
     instrumented = hosts.build_host().is_linux and args.build_instrumented
-    libzstd_builder = builders.ZstdBuilder(host_configs)
-    libzstd_builder.build()
 
     if not args.bootstrap_use_prebuilt and not args.bootstrap_use:
         stage1 = builders.Stage1Builder(host_configs)
@@ -1037,7 +1011,7 @@ def main():
         stage1.build_lldb = build_lldb
         stage1.enable_mlgo = mlgo
         stage1.build_extra_tools = args.run_tests_stage1
-        stage1.libzstd = libzstd_builder
+        stage1.use_sccache = sccache
         stage1.build()
         if hosts.build_host().is_linux:
             add_header_links('stage1', host_config=configs.host_config(musl))
@@ -1047,19 +1021,8 @@ def main():
             stage1.test()
         set_default_toolchain(stage1.installed_toolchain)
     if args.bootstrap_use:
-        # Remove previous install directories, since the bootstrap compiler
-        # will overwrite install directories.
-        if (paths.OUT_DIR / 'stage1-install').exists():
-            shutil.rmtree(paths.OUT_DIR / 'stage1-install')
-        if (paths.OUT_DIR / 'stage2-install').exists():
-            shutil.rmtree(paths.OUT_DIR / 'stage2-install')
-
         with timer.Timer(f'extract_bootstrap'):
             utils.extract_tarball(paths.OUT_DIR, args.bootstrap_use)
-
-        # If we were to use the full build as bootstrap, we need to rename it to stage-install.
-        if (paths.OUT_DIR / 'stage2-install').exists():
-            (paths.OUT_DIR / 'stage2-install').rename(paths.OUT_DIR / 'stage1-install')
         set_default_toolchain(toolchains.Toolchain(paths.OUT_DIR / 'stage1-install', paths.OUT_DIR / 'stage1'))
     if args.bootstrap_build_only:
         with timer.Timer(f'package_bootstrap'):
@@ -1095,7 +1058,10 @@ def main():
         stage2.bolt_optimize = args.bolt
         stage2.bolt_instrument = args.bolt_instrument
         stage2.profdata_file = profdata
-        stage2.build_cross_runtimes = hosts.build_host().is_linux
+        stage2.build_32bit_runtimes = hosts.build_host().is_linux
+
+        libzstd_builder = builders.ZstdBuilder(host_configs)
+        libzstd_builder.build()
         stage2.libzstd = libzstd_builder
 
         libxml2_builder = builders.LibXml2Builder(host_configs)
@@ -1174,10 +1140,6 @@ def main():
         if do_bolt_instrument:
             bolt_instrument(stage2)
 
-    if args.package_stage2_install:
-        utils.create_tarball(paths.OUT_DIR, ['stage2-install'],
-                             paths.DIST_DIR / 'stage2-install.tar.xz')
-
     if do_package and need_host:
         package_toolchain(
             stage2,
@@ -1194,9 +1156,6 @@ def main():
             with_runtimes=do_runtimes,
             create_tar=args.create_tar)
 
-    if build_errors:
-        logger().info(toolchain_errors.combine_toolchain_errors(build_errors))
-        return len(build_errors)
     return 0
 
 
