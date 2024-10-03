@@ -323,7 +323,10 @@ class BuiltinsBuilder(base_builders.LLVMRuntimeBuilder):
         # There is no NDK for riscv64, use the platform config instead.
         riscv64 = configs.AndroidRiscv64Config()
         riscv64.platform = True
-        result.append(riscv64)
+        # There is no NDK for loongarch64, use the platform config instead.
+        loongarch64 = configs.AndroidLoongarch64Config()
+        loongarch64.platform = True
+        result.append(loongarch64)
         result.append(configs.BaremetalAArch64Config())
         result.append(configs.BaremetalArmv6MConfig())
         result.append(configs.BaremetalArmv8MBaseConfig())
@@ -609,8 +612,12 @@ class LibUnwindBuilder(base_builders.LLVMRuntimeBuilder):
         riscv64 = configs.AndroidRiscv64Config()
         riscv64.platform = True
         riscv64.extra_config = {'is_exported': False}
-
         result.append(riscv64)
+
+        loongarch64 = configs.AndroidLoongarch64Config()
+        loongarch64.platform = True
+        loongarch64.extra_config = {'is_exported': False}
+        result.append(loongarch64)
 
         return result
 
@@ -925,6 +932,7 @@ class LldbServerBuilder(base_builders.LLVMRuntimeBuilder):
             hosts.Arch.I386: 'X86',
             hosts.Arch.X86_64: 'X86',
             hosts.Arch.RISCV64: 'RISCV',
+            hosts.Arch.LoongArch64: 'LoongArch',
         }[self._config.target_arch]
 
     @property
@@ -998,6 +1006,8 @@ class DeviceSysrootsBuilder(base_builders.Builder):
         # the STL and android_support headers and libraries.
         if arch == hosts.Arch.RISCV64:
             src_sysroot = paths.RISCV64_ANDROID_SYSROOT
+        elif arch == hosts.Arch.LoongArch64:
+            src_sysroot = paths.LOONGARCH64_ANDROID_SYSROOT
         else:
             src_sysroot = paths.NDK_BASE / 'toolchains' / 'llvm' / 'prebuilt' / 'linux-x86_64' / 'sysroot'
 
@@ -1005,7 +1015,7 @@ class DeviceSysrootsBuilder(base_builders.Builder):
         shutil.copytree(src_sysroot / 'usr' / 'include',
                         sysroot / 'usr' / 'include', symlinks=True)
 
-        if arch != hosts.Arch.RISCV64:
+        if arch != hosts.Arch.RISCV64 and arch != hosts.Arch.LoongArch64:
             # Remove the STL headers.
             shutil.rmtree(sysroot / 'usr' / 'include' / 'c++')
 
@@ -1022,8 +1032,9 @@ class DeviceSysrootsBuilder(base_builders.Builder):
 
         # Remove the NDK's libcompiler_rt-extras.  Also remove the NDK libc++,
         # except for the riscv64 sysroot which doesn't have these files.
-        (dest_lib / 'libcompiler_rt-extras.a').unlink()
-        if arch != hosts.Arch.RISCV64:
+        if arch != hosts.Arch.LoongArch64:
+            (dest_lib / 'libcompiler_rt-extras.a').unlink()
+        if arch != hosts.Arch.RISCV64 and arch != hosts.Arch.LoongArch64:
             (dest_lib / 'libc++abi.a').unlink()
             (dest_lib / 'libc++_static.a').unlink()
             (dest_lib / 'libc++_shared.so').unlink()

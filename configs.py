@@ -591,6 +591,7 @@ class AndroidConfig(_BaseConfig):
             hosts.Arch.I386: 'x86',
             hosts.Arch.RISCV64: 'riscv64',
             hosts.Arch.X86_64: 'x86_64',
+            hosts.Arch.LoongArch64: 'LoongArch',
         }[self.target_arch]
 
     @property
@@ -641,7 +642,7 @@ class AndroidConfig(_BaseConfig):
     def api_level(self) -> int:
         if self.override_api_level:
             return self.override_api_level
-        if self.target_arch == hosts.Arch.RISCV64:
+        if self.target_arch == hosts.Arch.RISCV64 or self.target_arch == hosts.Arch.LoongArch64:
             return 35
         if self.static or self.platform:
             # Set API level for platform to to 30 since these runtimes can be
@@ -684,6 +685,17 @@ class AndroidAArch64Config(AndroidConfig):
         cflags.append('-mbranch-protection=standard')
         return cflags
 
+class AndroidLoongarch64Config(AndroidConfig):
+    """Configs for android LoongArch64 targets."""
+    target_arch: hosts.Arch = hosts.Arch.LoongArch64
+    _toolchain_path: Optional[Path] = None
+
+    @property
+    def cflags(self) -> List[str]:
+        cflags = super().cflags
+        cflags.append(f'-isystem {self.sysroot}/usr/include/{self.ndk_sysroot_triple}')
+
+        return cflags
 
 class AndroidRiscv64Config(AndroidConfig):
     """Configs for android riscv64 targets."""
@@ -745,6 +757,7 @@ def android_configs(platform: bool=True,
         AndroidI386Config(),
         AndroidX64Config(),
         AndroidRiscv64Config(),
+        AndroidLoongarch64Config(),
     ]
     for config in configs:
         config.static = static
