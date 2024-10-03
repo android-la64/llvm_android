@@ -19,9 +19,9 @@ import re
 _llvm_next = False
 _version_read = False
 
-_patch_level = '0'
-_svn_revision = 'r530567'
-_git_sha = '3b5e7c83a6e226d5bd7ed2e9b67449b64812074c'
+_patch_level = '4'
+_svn_revision = 'r498229b'
+_git_sha = '14f0776550b5a49e1c42f49a00213f7f3fa047bf'
 
 # Psudo revision for top of trunk LLVM.
 _svn_revision_next = 'r99999999'
@@ -49,7 +49,7 @@ def get_svn_revision():
 def get_git_sha():
     _version_read = True
     if _llvm_next:
-        return "refs/for/main"
+        return "refs/for/master"
     return _git_sha
 
 

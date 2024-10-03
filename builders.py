@@ -81,7 +81,11 @@ class Stage1Builder(base_builders.LLVMBuilder):
 
     @property
     def llvm_runtime_projects(self) -> Set[str]:
-        return {'compiler-rt', 'libcxx', 'libcxxabi', 'libunwind'}
+        proj = {'compiler-rt', 'libcxx', 'libcxxabi'}
+        if isinstance(self._config, configs.LinuxMuslConfig):
+            # libcxx builds against libunwind when building for musl
+            proj.add('libunwind')
+        return proj
 
     @property
     def ldflags(self) -> List[str]:
@@ -97,10 +101,6 @@ class Stage1Builder(base_builders.LLVMBuilder):
             ldflags.append('-static-libstdc++')
 
         return ldflags
-
-    def ldflags_for_runtime(self, _config: configs.Config) -> List[str]:
-        # Stage1 doesn't cross-compile runtimes, so just use the same ldflags for LLVM and runtimes.
-        return self.ldflags
 
     @property
     def cmake_defines(self) -> Dict[str, str]:
@@ -121,11 +121,6 @@ class Stage1Builder(base_builders.LLVMBuilder):
 
         # Don't build libfuzzer as part of the first stage build.
         defines['COMPILER_RT_BUILD_LIBFUZZER'] = 'OFF'
-
-        # Use x86_64 models to optimize the release Android Clang.
-        if self.enable_mlgo:
-            defines['LLVM_INLINER_MODEL_PATH'] = paths.mlgo_model('x86_64/inlining-Oz-99f0063-v1.1')
-            defines['LLVM_RAEVICT_MODEL_PATH'] = paths.mlgo_model('x86_64/regalloc-evict-e67430c-v1.0')
 
         return defines
 
@@ -159,7 +154,11 @@ class Stage2Builder(base_builders.LLVMBuilder):
 
     @property
     def llvm_runtime_projects(self) -> Set[str]:
-        return {'compiler-rt', 'libcxx', 'libcxxabi', 'libunwind'}
+        proj = {'compiler-rt', 'libcxx', 'libcxxabi'}
+        if isinstance(self._config, configs.LinuxMuslConfig):
+            # libcxx builds against libunwind when building for musl
+            proj.add('libunwind')
+        return proj
 
     @property
     def ld_library_path_env_name(self) -> str:
@@ -181,32 +180,23 @@ class Stage2Builder(base_builders.LLVMBuilder):
                     + f':{self.install_dir}/lib')
         return env
 
-    def _common_ldflags(self, config: configs.Config) -> List[str]:
-        """Extra ldflags used for both the main LLVM stage2 and the runtimes builds."""
-        ldflags = []
-        # TODO: Turn on ICF for Darwin once it can be built with LLD.
-        if not config.target_os.is_darwin:
-            ldflags.append('-Wl,--icf=safe')
-        return ldflags
-
     @property
     def ldflags(self) -> List[str]:
         ldflags = super().ldflags
         if self._config.target_os.is_linux:
-            ldflags.append(f'-Wl,-rpath,\\$ORIGIN:\\$ORIGIN/../lib/{self._config.llvm_triple}')
+            if isinstance(self._config, configs.LinuxMuslConfig):
+                ldflags.append('-Wl,-rpath,\$ORIGIN/../lib/x86_64-unknown-linux-musl')
+            else:
+                ldflags.append('-Wl,-rpath,\$ORIGIN/../lib/x86_64-unknown-linux-gnu')
         # '$ORIGIN/../lib' is added by llvm's CMake rules.
         if self.bolt_optimize or self.bolt_instrument:
             ldflags.append('-Wl,-q')
+        # TODO: Turn on ICF for Darwin once it can be built with LLD.
+        if not self._config.target_os.is_darwin:
+            ldflags.append('-Wl,--icf=safe')
         if self.lto and self.enable_mlgo:
             ldflags.append('-Wl,-mllvm,-regalloc-enable-advisor=release')
-        if self.lto and not self.profdata_file and self._config.target_os.is_linux:
-            ldflags.append('-Wl,--lto-O0')
-        ldflags += self._common_ldflags(self._config)
         return ldflags
-
-    def ldflags_for_runtime(self, config: configs.Config) -> List[str]:
-        # N.B. The runtimes build doesn't add '$ORIGIN/../lib' implicitly.
-        return ['-Wl,-rpath,\\$ORIGIN'] + self._common_ldflags(config)
 
     @property
     def cflags(self) -> List[str]:
@@ -260,11 +250,6 @@ class Stage2Builder(base_builders.LLVMBuilder):
         # stdatomic.h.
         if self._config.target_os.is_darwin:
             defines['LLVM_BUILD_EXTERNAL_COMPILER_RT'] = 'ON'
-
-        # Embed ARM64 models for optimizing ARM64 AOSP / NDK.
-        if self.enable_mlgo:
-            defines['LLVM_INLINER_MODEL_PATH'] = paths.mlgo_model('arm64/inlining-Oz-chromium')
-            defines['LLVM_RAEVICT_MODEL_PATH'] = paths.mlgo_model('arm64/regalloc-evict-aosp')
 
         return defines
 
@@ -323,10 +308,7 @@ class BuiltinsBuilder(base_builders.LLVMRuntimeBuilder):
         # There is no NDK for riscv64, use the platform config instead.
         riscv64 = configs.AndroidRiscv64Config()
         riscv64.platform = True
-        # There is no NDK for loongarch64, use the platform config instead.
-        loongarch64 = configs.AndroidLoongarch64Config()
-        loongarch64.platform = True
-        result.append(loongarch64)
+        result.append(riscv64)
         result.append(configs.BaremetalAArch64Config())
         result.append(configs.BaremetalArmv6MConfig())
         result.append(configs.BaremetalArmv8MBaseConfig())
@@ -444,27 +426,17 @@ class CompilerRTBuilder(base_builders.LLVMRuntimeBuilder):
         return output_dir.parent / (output_dir.name + '-install')
 
     @property
+    def ldflags(self) -> List[str]:
+        ldflags = super().ldflags
+        if self._config.platform:
+            ldflags.append('-Wl,-z,max-page-size=65536')
+        return ldflags
+
+    @property
     def cmake_defines(self) -> Dict[str, str]:
         defines = super().cmake_defines
         defines['COMPILER_RT_BUILD_BUILTINS'] = 'OFF'
         defines['COMPILER_RT_USE_BUILTINS_LIBRARY'] = 'ON'
-        # Link an isolated copy of libc++ into the fuzzer archive.
-        defines['COMPILER_RT_USE_LIBCXX'] = 'ON'
-        # Set ANDROID_NATIVE_API_LEVEL for the sake of the custom libc++ built
-        # for the fuzzer. There is a check for ANDROID_NATIVE_API_LEVEL in
-        # HandleLLVMOptions.cmake that determines the value of
-        # LLVM_FORCE_SMALLFILE_FOR_ANDROID and _FILE_OFFSET_BITS.
-        defines['ANDROID_NATIVE_API_LEVEL'] = str(self._config.api_level)
-        # The fuzzer's isolated copy of libc++ is configured using
-        # -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY, which breaks some of
-        # the feature detection. Set some settings manually. These settings are
-        # passed through to a libc++ CMake invocation by `add_custom_libcxx` in
-        # compiler-rt/cmake/Modules/AddCompilerRT.cmake.
-        # TODO: Once github.com/llvm/llvm-project/pull/70534 is merged, these
-        # settings can be removed.
-        defines['LIBCXX_HAS_PTHREAD_LIB'] = 'OFF'
-        defines['LIBCXX_HAS_RT_LIB'] = 'OFF'
-        defines['LIBCXXABI_HAS_PTHREAD_LIB'] = 'OFF'
         # FIXME: Disable WError build until upstream fixed the compiler-rt
         # personality routine warnings caused by r309226.
         # defines['COMPILER_RT_ENABLE_WERROR'] = 'ON'
@@ -487,7 +459,8 @@ class CompilerRTBuilder(base_builders.LLVMRuntimeBuilder):
         # set. We want this flag on instead to catch unresolved references
         # early.
         defines['SANITIZER_COMMON_LINK_FLAGS'] = '-Wl,-z,defs'
-        defines['COMPILER_RT_HWASAN_WITH_INTERCEPTORS'] = 'OFF'
+        if self._config.platform:
+            defines['COMPILER_RT_HWASAN_WITH_INTERCEPTORS'] = 'OFF'
         return defines
 
     @property
@@ -612,12 +585,8 @@ class LibUnwindBuilder(base_builders.LLVMRuntimeBuilder):
         riscv64 = configs.AndroidRiscv64Config()
         riscv64.platform = True
         riscv64.extra_config = {'is_exported': False}
-        result.append(riscv64)
 
-        loongarch64 = configs.AndroidLoongarch64Config()
-        loongarch64.platform = True
-        loongarch64.extra_config = {'is_exported': False}
-        result.append(loongarch64)
+        result.append(riscv64)
 
         return result
 
@@ -783,7 +752,6 @@ class SwigBuilder(base_builders.AutoconfBuilder):
     def config_flags(self) -> List[str]:
         flags = super().config_flags
         flags.append('--without-pcre')
-        flags.append('--disable-ccache')
         return flags
 
     @property
@@ -793,13 +761,6 @@ class SwigBuilder(base_builders.AutoconfBuilder):
         for lib_dir in self.toolchain.lib_dirs:
             ldflags.append(f'-Wl,-rpath,{lib_dir}')
         return ldflags
-
-    @property
-    def env(self) -> List[str]:
-        env = super().env
-        env['BISON'] = paths.BISON_BIN_PATH
-        env['M4'] = paths.M4_BIN_PATH
-        return env
 
 
 class XzBuilder(base_builders.CMakeBuilder, base_builders.LibInfo):
@@ -932,7 +893,6 @@ class LldbServerBuilder(base_builders.LLVMRuntimeBuilder):
             hosts.Arch.I386: 'X86',
             hosts.Arch.X86_64: 'X86',
             hosts.Arch.RISCV64: 'RISCV',
-            hosts.Arch.LoongArch64: 'LoongArch',
         }[self._config.target_arch]
 
     @property
@@ -945,7 +905,6 @@ class LldbServerBuilder(base_builders.LLVMRuntimeBuilder):
         triple = self._config.llvm_triple
         defines['LLVM_HOST_TRIPLE'] = triple.replace('i686', 'i386')
         defines['LLDB_ENABLE_LUA'] = 'OFF'
-        defines['LLDB_INCLUDE_TESTS'] = 'OFF'
         return defines
 
     def install_config(self) -> None:
@@ -1006,8 +965,6 @@ class DeviceSysrootsBuilder(base_builders.Builder):
         # the STL and android_support headers and libraries.
         if arch == hosts.Arch.RISCV64:
             src_sysroot = paths.RISCV64_ANDROID_SYSROOT
-        elif arch == hosts.Arch.LoongArch64:
-            src_sysroot = paths.LOONGARCH64_ANDROID_SYSROOT
         else:
             src_sysroot = paths.NDK_BASE / 'toolchains' / 'llvm' / 'prebuilt' / 'linux-x86_64' / 'sysroot'
 
@@ -1015,7 +972,7 @@ class DeviceSysrootsBuilder(base_builders.Builder):
         shutil.copytree(src_sysroot / 'usr' / 'include',
                         sysroot / 'usr' / 'include', symlinks=True)
 
-        if arch != hosts.Arch.RISCV64 and arch != hosts.Arch.LoongArch64:
+        if arch != hosts.Arch.RISCV64:
             # Remove the STL headers.
             shutil.rmtree(sysroot / 'usr' / 'include' / 'c++')
 
@@ -1032,9 +989,8 @@ class DeviceSysrootsBuilder(base_builders.Builder):
 
         # Remove the NDK's libcompiler_rt-extras.  Also remove the NDK libc++,
         # except for the riscv64 sysroot which doesn't have these files.
-        if arch != hosts.Arch.LoongArch64:
-            (dest_lib / 'libcompiler_rt-extras.a').unlink()
-        if arch != hosts.Arch.RISCV64 and arch != hosts.Arch.LoongArch64:
+        (dest_lib / 'libcompiler_rt-extras.a').unlink()
+        if arch != hosts.Arch.RISCV64:
             (dest_lib / 'libc++abi.a').unlink()
             (dest_lib / 'libc++_static.a').unlink()
             (dest_lib / 'libc++_shared.so').unlink()
@@ -1069,62 +1025,37 @@ class DeviceLibcxxBuilder(base_builders.LLVMRuntimeBuilder):
     name = 'device-libcxx'
     src_dir: Path = paths.LLVM_PATH / 'runtimes'
 
-    config_list: List[configs.Config] = (
-        configs.android_configs(platform=True, extra_config={'hwasan': False, 'noexcept': False}) +
-        configs.android_configs(platform=True, extra_config={'hwasan': False, 'noexcept': True}) +
-        configs.android_configs(platform=False, extra_config={'hwasan': False, 'noexcept': False})
-    )
-
-    def _hwasan_config(platform: bool, noexcept: bool) -> configs.Config:
-        result = configs.AndroidAArch64Config()
-        result.platform = platform
-        result.extra_config = {'hwasan': True, 'noexcept': noexcept}
-        # Increase the NDK's API level to the minimum API level for HWASan.
-        if not platform:
-            result.override_api_level = 29
+    def gen_configs(platform: bool, apex: bool):
+        result = configs.android_configs(platform=platform,
+            suppress_libcxx_headers=True, extra_config={'apex': apex})
+        # The non-APEX system libc++.so needs to be built against a newer API so
+        # it uses the unwinder from libc.so. RISC-V uses API 10000 instead
+        # currently.
+        if platform and not apex:
+            for config in result:
+                if config.target_arch != hosts.Arch.RISCV64:
+                    config.override_api_level = 33
         return result
 
-    # Use a separate config list so that HWASan libc++ can be built after
-    # compiler-rt, so that libc++.so can be linked against the HWASan lib.
-    hwasan_config_list: List[configs.Config] = [
-        _hwasan_config(platform=True, noexcept=False),
-        _hwasan_config(platform=True, noexcept=True),
-        _hwasan_config(platform=False, noexcept=False),
-    ]
+    config_list: List[configs.Config] = (
+        gen_configs(platform=False, apex=False) +
+        gen_configs(platform=True, apex=False) +
+        gen_configs(platform=True, apex=True)
+    )
 
     @property
-    def _is_hwasan(self) -> bool:
-        return self._config.extra_config['hwasan']
+    def _is_ndk(self) -> bool:
+        return not self._config.platform
 
-    # A special build of libc++_static.a with exceptions turned off, for use in
-    # the Bionic loader where ELF TLS isn't available for accessing EH globals.
     @property
-    def _is_noexcept(self) -> bool:
-        return self._config.extra_config['noexcept']
+    def _is_apex(self) -> bool:
+        return self._config.extra_config['apex']
 
     @property
     def output_dir(self) -> Path:
         old_path = super().output_dir
-        name = old_path.name
-        if self._is_noexcept:
-            name += '-noexcept'
-        if self._is_hwasan:
-            name += '-hwasan'
-        return old_path.parent / name
-
-    @property
-    def cflags(self) -> list[str]:
-        result = super().cflags
-        result.extend(('-fdebug-info-for-profiling',
-                       '-mllvm', '-enable-fs-discriminator=true',
-                       # TODO(b/266595187): Remove the following feature once it is
-                       # enabled in LLVM by default.
-                       '-mllvm', '-improved-fs-discriminator=true'))
-        if self._config.target_arch is hosts.Arch.ARM:
-            result.append('-mthumb')
-        if self._is_hwasan:
-            result.append('-fsanitize=hwaddress')
-        return result
+        suffix = '-apex' if self._config.extra_config['apex'] else ''
+        return old_path.parent / (old_path.name + suffix)
 
     @property
     def cxxflags(self) -> list[str]:
@@ -1146,69 +1077,38 @@ class DeviceLibcxxBuilder(base_builders.LLVMRuntimeBuilder):
         # Avoid linking the STL because it does not exist yet.
         result = super().ldflags + ['-nostdlib++']
 
-        # For the platform (including APEX) libc++ builds, use the unwinder API
-        # exported from libc.so. Link libunwind.a for NDK builds, which must run
-        # on older platforms where libc.so didn't export the unwinder.
-        if self._config.platform:
-            result.append('-unwindlib=none')
-        else:
+        # For the platform libc++ build, use the unwinder API exported from
+        # libc.so. Otherwise, link libunwind.a.
+        if self._is_ndk or self._is_apex:
             result.append('-unwindlib=libunwind')
-
-        if self._is_hwasan:
-            result.append('-fsanitize=hwaddress')
+        else:
+            result.append('-unwindlib=none')
 
         return result
 
     @property
     def cmake_defines(self) -> Dict[str, str]:
-        executor = paths.LLVM_PATH / 'libcxx' / 'utils' / 'adb_run.py'
-
         defines: Dict[str, str] = super().cmake_defines
-        # debug info is needed for AutoFDO
-        defines['CMAKE_BUILD_TYPE'] = 'RelWithDebInfo'
-
         defines['LLVM_ENABLE_RUNTIMES'] ='libcxx;libcxxabi'
-
-        # When the libc++ lit tests invoke clang, they set the triple and
-        # sysroot using these generic CMake flags.
-        defines['CMAKE_C_COMPILER_TARGET'] = self._config.llvm_triple
-        defines['CMAKE_CXX_COMPILER_TARGET'] = self._config.llvm_triple
-        defines['CMAKE_SYSROOT'] = self._config.sysroot
-
         defines['LIBCXXABI_ENABLE_SHARED'] = 'OFF'
-        defines['LIBCXXABI_EXECUTOR'] = executor
-        defines['LIBCXXABI_USE_LLVM_UNWINDER'] = 'OFF'
-        if self._config.platform:
+        defines['LIBCXXABI_TARGET_TRIPLE'] = self._config.llvm_triple
+        if not self._is_ndk:
             defines['LIBCXXABI_NON_DEMANGLING_TERMINATE'] = 'ON'
             defines['LIBCXXABI_STATIC_DEMANGLE_LIBRARY'] = 'ON'
-            # TODO: Set LIBCXXABI_TEST_CONFIG for the platform libc++.so.
-        else:
-            defines['LIBCXXABI_TEST_CONFIG'] = 'llvm-libc++abi-android-ndk.cfg.in'
 
-        if self._is_noexcept:
-            defines['LIBCXX_ENABLE_SHARED'] = 'OFF'
-            defines['LIBCXXABI_ENABLE_EXCEPTIONS'] = 'OFF'
-            defines['LIBCXX_ENABLE_EXCEPTIONS'] = 'OFF'
-            defines['LIBCXX_STATIC_OUTPUT_NAME'] = 'c++_static_noexcept'
-            defines['LIBCXXABI_STATIC_OUTPUT_NAME'] = 'c++abi_noexcept'
-            defines['LIBCXXABI_DEMANGLE_STATIC_OUTPUT_NAME'] = 'c++demangle_noexcept'
-        else:
-            defines['LIBCXX_ENABLE_SHARED'] = 'ON'
-            defines['LIBCXX_STATIC_OUTPUT_NAME'] = 'c++_static'
-
+        defines['LIBCXX_ENABLE_SHARED'] = 'ON'
+        defines['LIBCXX_TARGET_TRIPLE'] = self._config.llvm_triple
         defines['LIBCXX_ENABLE_ABI_LINKER_SCRIPT'] = 'OFF'
         defines['LIBCXX_ENABLE_STATIC_ABI_LIBRARY'] = 'ON'
         defines['LIBCXX_STATICALLY_LINK_ABI_IN_SHARED_LIBRARY'] = 'ON'
-        defines['LIBCXX_EXECUTOR'] = executor
-        if self._config.platform:
-            defines['LIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY'] = 'ON'
-            # TODO: Set LIBCXX_TEST_CONFIG for the platform libc++.so.
-        else:
+        defines['LIBCXX_STATIC_OUTPUT_NAME'] = 'c++_static'
+        if self._is_ndk:
             defines['LIBCXX_SHARED_OUTPUT_NAME'] = 'c++_shared'
             defines['LIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY'] = 'OFF'
             defines['LIBCXX_ABI_VERSION'] = '1'
             defines['LIBCXX_ABI_NAMESPACE'] = '__ndk1'
-            defines['LIBCXX_TEST_CONFIG'] = 'llvm-libc++-android-ndk.cfg.in'
+        else:
+            defines['LIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY'] = 'ON'
 
         # There is a check for ANDROID_NATIVE_API_LEVEL in
         # HandleLLVMOptions.cmake that determines the value of
@@ -1222,44 +1122,41 @@ class DeviceLibcxxBuilder(base_builders.LLVMRuntimeBuilder):
         arch = self._config.target_arch
         sysroot_lib = self._config.sysroot / 'usr' / 'lib'
 
-        if not self._is_hwasan and not self._is_noexcept:
-            # Copy libc++ headers into the NDK+platform sysroot.
+        # Copy libc++ headers into the NDK+platform sysroot.
+        if self._is_ndk or self._is_apex:
             shutil.copytree(self.output_dir / 'include',
                             self._config.sysroot / 'usr' / 'include',
                             dirs_exist_ok=True, symlinks=True)
 
-            # Copy libraries into the NDK sysroot, and generate libc++.{a,so}
-            # linker scripts.
-            if not self._config.platform:
-                for name in ['libc++abi.a', 'libc++_shared.so', 'libc++_static.a']:
-                    shutil.copy2(self.output_dir / 'lib' / name, sysroot_lib / name)
-                with open(sysroot_lib / 'libc++.a', 'w') as out:
-                    out.write('INPUT(-lc++_static -lc++abi)\n')
-                with open(sysroot_lib / 'libc++.so', 'w') as out:
-                    out.write('INPUT(-lc++_shared)\n')
+        # Copy libraries into the NDK sysroot, and generate libc++.{a,so} linker
+        # scripts.
+        if self._is_ndk:
+            for name in ['libc++abi.a', 'libc++_shared.so', 'libc++_static.a']:
+                shutil.copy2(self.output_dir / 'lib' / name, sysroot_lib / name)
+            with open(sysroot_lib / 'libc++.a', 'w') as out:
+                out.write('INPUT(-lc++_static -lc++abi)\n')
+            with open(sysroot_lib / 'libc++.so', 'w') as out:
+                out.write('INPUT(-lc++_shared)\n')
 
-            # Copy libraries into the platform sysroot.
-            if self._config.platform:
-                for name in ['libc++abi.a', 'libc++.so']:
-                    shutil.copy2(self.output_dir / 'lib' / name, sysroot_lib / name)
+        # Copy libraries into the platform sysroot. Use the APEX build, which
+        # targets a lower API level.
+        if self._is_apex:
+            for name in ['libc++abi.a', 'libc++.so']:
+                shutil.copy2(self.output_dir / 'lib' / name, sysroot_lib / name)
 
         # Copy the output files to a directory structure for use with (a) Soong
         # and (b) the NDK's checkbuild.py. Offer the experimental library in the
         # NDK but omit it from the platform because we want to discourage
         # platform developers from using unstable APIs.
-        if self._config.platform:
-            if self._is_noexcept:
-                kind = 'platform_noexcept'
-                libs = ['libc++abi_noexcept.a', 'libc++_static_noexcept.a', 'libc++demangle_noexcept.a']
-            else:
-                kind = 'platform'
-                libs = ['libc++abi.a', 'libc++_static.a', 'libc++.so', 'libc++demangle.a']
-        else:
-            assert not self._is_noexcept
+        if self._is_ndk:
             kind = 'ndk'
             libs = ['libc++abi.a', 'libc++_static.a', 'libc++_shared.so', 'libc++experimental.a']
-        if self._is_hwasan:
-            kind += '_hwasan'
+        else:
+            libs = ['libc++abi.a', 'libc++_static.a', 'libc++.so', 'libc++demangle.a']
+            if self._is_apex:
+                kind = 'apex'
+            else:
+                kind = 'platform'
         dst_dir = self.output_toolchain.path / 'android_libc++' / kind / arch.value
         dst_lib_dir = dst_dir / 'lib'
         dst_lib_dir.mkdir(parents=True, exist_ok=True)
@@ -1286,7 +1183,7 @@ class WinLibCxxBuilder(base_builders.LLVMRuntimeBuilder):
     @property
     def cmake_defines(self) -> Dict[str, str]:
         defines: Dict[str, str] = super().cmake_defines
-        defines['LLVM_ENABLE_RUNTIMES'] = 'libcxx;libcxxabi;libunwind'
+        defines['LLVM_ENABLE_RUNTIMES'] = 'libcxx;libcxxabi'
         defines['LLVM_ENABLE_PER_TARGET_RUNTIME_DIR'] = 'ON'
 
         defines['LIBCXX_ENABLE_STATIC_ABI_LIBRARY'] = 'ON'
@@ -1303,10 +1200,6 @@ class WinLibCxxBuilder(base_builders.LLVMRuntimeBuilder):
         defines['LIBCXX_ENABLE_SHARED'] = 'OFF'
         defines['LIBCXXABI_ENABLE_SHARED'] = 'OFF'
         defines['LIBCXX_ENABLE_EXPERIMENTAL_LIBRARY'] = 'OFF'
-
-        # Use static libunwinder for host builds.
-        defines['LIBCXXABI_USE_LLVM_UNWINDER'] = 'ON'
-        defines['LIBCXXABI_ENABLE_STATIC_UNWINDER'] = 'ON'
 
         if self.enable_assertions:
             defines['LIBCXX_ENABLE_ASSERTIONS'] = 'ON'

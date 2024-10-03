@@ -1,4 +1,4 @@
-From cceb020e3497e1af208e546ac971e265f46d2f66 Mon Sep 17 00:00:00 2001
+From 6b29a55c864587e80cc26014b73f19f5c7910cff Mon Sep 17 00:00:00 2001
 From: Ryan Prichard <rprichard@google.com>
 Date: Mon, 25 Jul 2022 18:05:30 -0700
 Subject: [PATCH] [libc++abi] Optionally move __cxa_demangle into
@@ -9,23 +9,15 @@ is always used with LIBCXXABI_NON_DEMANGLING_TERMINATE.
 
 Differential Revision: https://reviews.llvm.org/D139493
 ---
- libcxxabi/CMakeLists.txt     |  9 +++++++++
+ libcxxabi/CMakeLists.txt     |  8 ++++++++
  libcxxabi/src/CMakeLists.txt | 25 ++++++++++++++++++++++++-
- 2 files changed, 33 insertions(+), 1 deletion(-)
+ 2 files changed, 32 insertions(+), 1 deletion(-)
 
 diff --git a/libcxxabi/CMakeLists.txt b/libcxxabi/CMakeLists.txt
-index efe830bd2ad6..17fb41eda1a6 100644
+index 8f48d402bc22..d7f4719c895b 100644
 --- a/libcxxabi/CMakeLists.txt
 +++ b/libcxxabi/CMakeLists.txt
-@@ -79,6 +79,7 @@ option(LIBCXXABI_INSTALL_LIBRARY "Install the libc++abi library." ON)
- 
- set(LIBCXXABI_SHARED_OUTPUT_NAME "c++abi" CACHE STRING "Output name for the shared libc++abi runtime library.")
- set(LIBCXXABI_STATIC_OUTPUT_NAME "c++abi" CACHE STRING "Output name for the static libc++abi runtime library.")
-+set(LIBCXXABI_DEMANGLE_STATIC_OUTPUT_NAME "c++demangle" CACHE STRING "Output name for the optional libc++demangle runtime library.")
- 
- set(LIBCXXABI_INSTALL_INCLUDE_DIR "${CMAKE_INSTALL_INCLUDEDIR}/c++/v1" CACHE STRING "Path to install the libc++abi headers at.")
- 
-@@ -123,6 +124,14 @@ option(LIBCXXABI_SILENT_TERMINATE "Set this to make the terminate handler defaul
+@@ -130,6 +130,14 @@ option(LIBCXXABI_SILENT_TERMINATE "Set this to make the terminate handler defaul
  option(LIBCXXABI_NON_DEMANGLING_TERMINATE "Set this to make the terminate handler
  avoid demangling" OFF)
  
@@ -41,7 +33,7 @@ index efe830bd2ad6..17fb41eda1a6 100644
    message(FATAL_ERROR "libc++abi must be built as either a shared or static library.")
  endif()
 diff --git a/libcxxabi/src/CMakeLists.txt b/libcxxabi/src/CMakeLists.txt
-index 4198827203fc..2b77f0b24874 100644
+index 58df59a5725a..4c16850a863c 100644
 --- a/libcxxabi/src/CMakeLists.txt
 +++ b/libcxxabi/src/CMakeLists.txt
 @@ -3,7 +3,6 @@ set(LIBCXXABI_SOURCES
@@ -65,12 +57,12 @@ index 4198827203fc..2b77f0b24874 100644
  if (LIBCXXABI_ENABLE_NEW_DELETE_DEFINITIONS)
    list(APPEND LIBCXXABI_SOURCES
      stdlib_new_delete.cpp
-@@ -154,6 +159,24 @@ endif()
- 
- include(WarningFlags)
+@@ -158,6 +163,24 @@ if (NOT TARGET pstl::ParallelSTL)
+   message(STATUS "Could not find ParallelSTL, libc++abi will not attempt to use it but the build may fail if the libc++ in use needs it to be available.")
+ endif()
  
 +if (LIBCXXABI_STATIC_DEMANGLE_LIBRARY)
-+  add_library(cxxabi_demangle_static STATIC abort_message.cpp cxa_demangle.cpp ${LIBCXXABI_HEADERS})
++  add_library(cxxabi_demangle_static STATIC cxa_demangle.cpp ${LIBCXXABI_HEADERS})
 +  target_link_libraries(cxxabi_demangle_static PRIVATE cxx-headers cxxabi-headers)
 +  set_target_properties(cxxabi_demangle_static
 +    PROPERTIES
@@ -79,7 +71,7 @@ index 4198827203fc..2b77f0b24874 100644
 +      CXX_STANDARD_REQUIRED OFF
 +      COMPILE_FLAGS "${LIBCXXABI_COMPILE_FLAGS}"
 +      LINK_FLAGS "${LIBCXXABI_LINK_FLAGS}"
-+      OUTPUT_NAME "${LIBCXXABI_DEMANGLE_STATIC_OUTPUT_NAME}"
++      OUTPUT_NAME "c++demangle"
 +    )
 +  list(APPEND LIBCXXABI_BUILD_TARGETS "cxxabi_demangle_static")
 +  if (LIBCXXABI_INSTALL_STATIC_LIBRARY)
@@ -89,7 +81,7 @@ index 4198827203fc..2b77f0b24874 100644
 +
  # Build the shared library.
  add_library(cxxabi_shared_objects OBJECT EXCLUDE_FROM_ALL ${LIBCXXABI_SOURCES} ${LIBCXXABI_HEADERS})
- cxx_add_warning_flags(cxxabi_shared_objects ${LIBCXXABI_ENABLE_WERROR} ${LIBCXXABI_ENABLE_PEDANTIC})
+ if (LIBCXXABI_USE_LLVM_UNWINDER)
 -- 
-2.44.0.769.g3c40516874-goog
+2.39.0.314.g84b9a713c41-goog
 
