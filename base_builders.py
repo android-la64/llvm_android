@@ -266,7 +266,7 @@ class AutoconfBuilder(Builder):
             cflags.append(f'--sysroot={self._config.sysroot}')
         if self._config.target_os.is_darwin:
             sdk_path = self._get_mac_sdk_path()
-            cflags.append(f'-mmacosx-version-min={constants.MAC_MIN_VERSION}')
+            cflags.append(f'-mmacos-version-min={constants.MAC_MIN_VERSION}')
             cflags.append(f'-DMACOSX_DEPLOYMENT_TARGET={constants.MAC_MIN_VERSION}')
             cflags.append(f'-isysroot{sdk_path}')
             cflags.append(f'-Wl,-syslibroot,{sdk_path}')
@@ -423,7 +423,7 @@ class CMakeBuilder(Builder):
             # Inhibit all of CMake's own NDK handling code.
             defines['CMAKE_SYSTEM_VERSION'] = '1'
         if self._config.target_os.is_darwin:
-            # This will be used to set -mmacosx-version-min. And helps to choose SDK.
+            # This will be used to set -mmacos-version-min. And helps to choose SDK.
             # To specify a SDK, set CMAKE_OSX_SYSROOT or SDKROOT environment variable.
             defines['CMAKE_OSX_DEPLOYMENT_TARGET'] = constants.MAC_MIN_VERSION
             # Build universal binaries.
@@ -512,7 +512,6 @@ class LLVMBaseBuilder(CMakeBuilder):  # pylint: disable=abstract-method
 
         # https://github.com/android-ndk/ndk/issues/574 - Don't depend on libtinfo.
         defines['LLVM_ENABLE_TERMINFO'] = 'OFF'
-        defines['LLVM_ENABLE_THREADS'] = 'ON'
         defines['LLVM_ENABLE_PLUGINS'] = 'OFF'
         if patch_level := android_version.get_patch_level():
             defines['LLVM_VERSION_PATCH'] = patch_level
@@ -523,6 +522,7 @@ class LLVMBaseBuilder(CMakeBuilder):  # pylint: disable=abstract-method
 
         # To prevent cmake from checking libstdcxx version.
         defines['LLVM_ENABLE_LIBCXX'] = 'ON'
+        defines['LLVM_STATIC_LINK_CXX_STDLIB'] = 'ON'
 
         if self._config.target_os.is_darwin:
             defines['LLVM_USE_LINKER'] = 'ld'
@@ -583,10 +583,9 @@ class LLVMBuilder(LLVMBaseBuilder):
     enable_assertions: bool = False
     enable_mlgo: bool = False
     toolchain_name: str
-    use_sccache: bool = False
     libzstd: Optional[LibInfo] = None
     runtimes_triples: List[str] = list()
-    build_32bit_runtimes: bool = False
+    build_cross_runtimes: bool = False
 
     # lldb options.
     build_lldb: bool = True
@@ -665,15 +664,6 @@ class LLVMBuilder(LLVMBaseBuilder):
         else:
             defines['LLDB_ENABLE_CURSES'] = 'OFF'
 
-        if self.libzstd:
-            defines['LLVM_ENABLE_ZSTD'] = 'FORCE_ON'
-            defines['LLVM_USE_STATIC_ZSTD'] = 'ON'
-            defines['zstd_LIBRARY'] = self.libzstd.link_libraries[0]
-            defines['zstd_STATIC_LIBRARY'] = self.libzstd.link_libraries[1]
-            defines['zstd_INCLUDE_DIR'] = self.libzstd.include_dir
-        else:
-            defines['LLVM_ENABLE_ZSTD'] = 'OFF'
-
         defines['LLDB_INCLUDE_TESTS'] = 'OFF'
 
     def _install_lib_deps(self, lib_dir, bin_dir=None) -> None:
@@ -719,14 +709,12 @@ class LLVMBuilder(LLVMBaseBuilder):
 
             self._install_lib_deps(lib_dir, bin_dir)
 
+    def ldflags_for_runtime(self, config: configs.Config) -> List[str]:
+        raise NotImplementedError()
+
     @property
     def cmake_defines(self) -> Dict[str, str]:
         defines = super().cmake_defines
-
-        if self.use_sccache:
-            defines['CMAKE_C_COMPILER_LAUNCHER'] = 'sccache'
-            defines['CMAKE_CXX_COMPILER_LAUNCHER'] = 'sccache'
-            defines['LLVM_PARALLEL_COMPILE_JOBS'] = int(multiprocessing.cpu_count()) * 10
 
         defines['LLVM_ENABLE_PROJECTS'] = ';'.join(sorted(self.llvm_projects))
         defines['LLVM_ENABLE_RUNTIMES'] = ';'.join(sorted(self.llvm_runtime_projects))
@@ -761,6 +749,15 @@ class LLVMBuilder(LLVMBaseBuilder):
             defines['LIBXML2_INCLUDE_DIR'] = str(self.libxml2.include_dir)
             defines['LIBXML2_LIBRARY'] = str(self.libxml2.link_libraries[0])
 
+        if self.libzstd:
+            defines['LLVM_ENABLE_ZSTD'] = 'FORCE_ON'
+            defines['LLVM_USE_STATIC_ZSTD'] = 'ON'
+            defines['zstd_LIBRARY'] = self.libzstd.link_libraries[0]
+            defines['zstd_STATIC_LIBRARY'] = self.libzstd.link_libraries[1]
+            defines['zstd_INCLUDE_DIR'] = self.libzstd.include_dir
+        else:
+            defines['LLVM_ENABLE_ZSTD'] = 'OFF'
+
         if self.build_lldb:
             self._set_lldb_flags(self._config.target_os, defines)
 
@@ -770,6 +767,10 @@ class LLVMBuilder(LLVMBaseBuilder):
         # Omit versions on LLVM's Linux and Darwin shared libraries. The versions for the runtimes
         # (e.g. libc++) are also omitted, using OS-specific versions of the same CMake flag.
         defines['CMAKE_PLATFORM_NO_VERSIONED_SONAME'] = 'ON'
+
+        # Use static libunwinder for host builds.
+        defines['LIBCXXABI_USE_LLVM_UNWINDER'] = 'ON'
+        defines['LIBCXXABI_ENABLE_STATIC_UNWINDER'] = 'ON'
 
         if self._config.target_os.is_darwin:
             defines['COMPILER_RT_ENABLE_IOS'] = 'OFF'
@@ -786,23 +787,29 @@ class LLVMBuilder(LLVMBaseBuilder):
             defines['LIBCXX_ENABLE_STATIC_ABI_LIBRARY'] = 'ON'
 
         if self._config.target_os.is_linux:
-            runtime_configs = [self._config]
-            if self.build_32bit_runtimes:
-                if self._config.is_musl:
-                    runtime_configs.append(configs.LinuxMuslHostConfig(hosts.Arch.I386))
-                else:
-                    runtime_configs.append(configs.LinuxConfig(is_32_bit=True))
+            runtime_configs: List[configs.Config] = []
+            if self.build_cross_runtimes:
+                # We have to build libc++ for musl for the sake of
+                # MuslHostRuntimeBuilder, which is enabled for both the glibc
+                # and musl builds of LLVM.
+                runtime_configs = [
+                    configs.LinuxMuslHostConfig(hosts.Arch.ARM),
+                    configs.LinuxMuslHostConfig(hosts.Arch.AARCH64),
+                    configs.LinuxMuslHostConfig(hosts.Arch.I386),
+                    configs.LinuxMuslHostConfig(hosts.Arch.X86_64),
+                ]
+                if not self._config.is_musl:
+                    runtime_configs += [
+                        self._config,
+                        configs.LinuxConfig(is_32_bit=True),
+                    ]
+            else:
+                runtime_configs = [self._config]
 
             self.runtimes_triples = list(_config.llvm_triple for _config in runtime_configs)
             triples = ';'.join(self.runtimes_triples)
             defines['LLVM_BUILTIN_TARGETS'] = triples
             defines['LLVM_RUNTIME_TARGETS'] = triples
-
-            # With per-target runtime dirs, clang no longer links the builtins
-            # for the glibc triple when targetting musl.  In the glibc
-            # configuration, build the musl builtins as well.
-            if self.build_32bit_runtimes and not self._config.is_musl:
-                defines['LLVM_BUILTIN_TARGETS'] = triples + ';x86_64-unknown-linux-musl;i686-unknown-linux-musl'
 
             # We need to explicitly propagate some CMake flags to the runtimes
             # CMake invocation that builds compiler-rt, libcxx, and other
@@ -810,13 +817,15 @@ class LLVMBuilder(LLVMBaseBuilder):
             runtimes_passthrough_args = [
                     'CMAKE_POSITION_INDEPENDENT_CODE',
                     'LLVM_ENABLE_LIBCXX',
+                    'LIBCXXABI_USE_LLVM_UNWINDER',
+                    'LIBCXXABI_ENABLE_STATIC_UNWINDER',
             ]
 
             for _config in runtime_configs:
                 triple = _config.llvm_triple
                 cflags = _config.cflags + self.cflags
                 cxxflags = _config.cxxflags + self.cxxflags
-                ldflags = _config.ldflags + self.ldflags
+                ldflags = _config.ldflags + self.ldflags_for_runtime(_config)
 
                 if _config.sysroot:
                     cflags.append(f'--sysroot={_config.sysroot}')
@@ -825,43 +834,41 @@ class LLVMBuilder(LLVMBaseBuilder):
                 cxxflags_str = ' '.join(cxxflags)
                 ldflags_str = ' '.join(ldflags)
 
-                if _config.sysroot:
-                    defines[f'RUNTIMES_{triple}_CMAKE_SYSROOT'] = _config.sysroot
-                defines[f'RUNTIMES_{triple}_CMAKE_C_FLAGS'] = cflags_str
-                defines[f'RUNTIMES_{triple}_CMAKE_CXX_FLAGS'] = cxxflags_str
-                defines[f'RUNTIMES_{triple}_CMAKE_EXE_LINKER_FLAGS'] = ldflags_str
-                defines[f'RUNTIMES_{triple}_CMAKE_SHARED_LINKER_FLAGS'] = ldflags_str
-                defines[f'RUNTIMES_{triple}_CMAKE_MODULE_LINKER_FLAGS'] = ldflags_str
-                defines[f'RUNTIMES_{triple}_CMAKE_PLATFORM_NO_VERSIONED_SONAME'] = 'ON'
+                for base in ('BUILTINS', 'RUNTIMES'):
+                    if _config.sysroot:
+                        defines[f'{base}_{triple}_CMAKE_SYSROOT'] = _config.sysroot
+                    defines[f'{base}_{triple}_CMAKE_C_FLAGS'] = cflags_str
+                    defines[f'{base}_{triple}_CMAKE_CXX_FLAGS'] = cxxflags_str
+                    defines[f'{base}_{triple}_CMAKE_EXE_LINKER_FLAGS'] = ldflags_str
+                    defines[f'{base}_{triple}_CMAKE_SHARED_LINKER_FLAGS'] = ldflags_str
+                    defines[f'{base}_{triple}_CMAKE_MODULE_LINKER_FLAGS'] = ldflags_str
+                    defines[f'{base}_{triple}_CMAKE_PLATFORM_NO_VERSIONED_SONAME'] = 'ON'
 
-                # clang generates call to builtin functions when building
-                # compiler-rt for musl.  Allow use of the builtins library.
-                if _config.is_musl:
-                    defines[f'RUNTIMES_{triple}_COMPILER_RT_USE_BUILTINS_LIBRARY'] = 'ON'
+                    if _config.is_musl:
+                        for key, value in _config.cmake_defines.items():
+                            defines[f'{base}_{triple}_{key}'] = value
 
-                for arg in runtimes_passthrough_args:
-                    defines[f'RUNTIMES_{triple}_{arg}'] = defines[arg]
+                    for arg in runtimes_passthrough_args:
+                        defines[f'{base}_{triple}_{arg}'] = defines[arg]
 
-                # Don't depend on the host libatomic library.
-                defines[f'RUNTIMES_{triple}_LIBCXX_HAS_ATOMIC_LIB'] = 'NO'
+                    # Don't depend on the host libatomic library.
+                    defines[f'{base}_{triple}_LIBCXX_HAS_ATOMIC_LIB'] = 'NO'
 
-                # Make libc++.so a symlink to libc++.so.x instead of a linker script that
-                # also adds -lc++abi.  Statically link libc++abi to libc++ so it is not
-                # necessary to pass -lc++abi explicitly.
-                defines[f'RUNTIMES_{triple}_LIBCXX_ENABLE_ABI_LINKER_SCRIPT'] = 'OFF'
-                defines[f'RUNTIMES_{triple}_LIBCXX_ENABLE_STATIC_ABI_LIBRARY'] = 'ON'
+                    # Make libc++.so a symlink to libc++.so.x instead of a linker script that
+                    # also adds -lc++abi.  Statically link libc++abi to libc++ so it is not
+                    # necessary to pass -lc++abi explicitly.
+                    defines[f'{base}_{triple}_LIBCXX_ENABLE_ABI_LINKER_SCRIPT'] = 'OFF'
+                    defines[f'{base}_{triple}_LIBCXX_ENABLE_STATIC_ABI_LIBRARY'] = 'ON'
 
-                # Set LIBCXX variables for compiler and linker flags for tests.
-                defines[f'RUNTIMES_{triple}_LIBCXX_TEST_COMPILER_FLAGS'] = cxxflags_str
-                defines[f'RUNTIMES_{triple}_LIBCXX_TEST_LINKER_FLAGS'] = ldflags_str
+                    # Set LIBCXX variables for compiler and linker flags for tests.
+                    defines[f'{base}_{triple}_LIBCXX_TEST_COMPILER_FLAGS'] = cxxflags_str
+                    defines[f'{base}_{triple}_LIBCXX_TEST_LINKER_FLAGS'] = ldflags_str
 
-                # Don't let libclang_rt.*_cxx.a depend on libc++abi.
-                defines[f'RUNTIMES_{triple}_SANITIZER_ALLOW_CXXABI'] = 'OFF'
+                    # Don't let libclang_rt.*_cxx.a depend on libc++abi.
+                    defines[f'{base}_{triple}_SANITIZER_ALLOW_CXXABI'] = 'OFF'
 
         if self.enable_mlgo:
             defines['TENSORFLOW_AOT_PATH'] = paths.get_tensorflow_path()
-            defines['LLVM_INLINER_MODEL_PATH'] = paths.mlgo_model('inlining-Oz-99f0063-v1.1')
-            defines['LLVM_RAEVICT_MODEL_PATH'] = paths.mlgo_model('regalloc-evict-e67430c-v1.0')
 
         return defines
 
@@ -881,20 +888,18 @@ class LLVMBuilder(LLVMBaseBuilder):
         """Gets the built Toolchain."""
         return toolchains.Toolchain(self.install_dir, self.output_dir)
 
-    def build(self) -> None:
-        super().build()
-        if self.use_sccache:
-            utils.check_call(['sccache', '--show-stats'])
-
-
     def test(self) -> None:
         with timer.Timer(f'stage2_test'):
             # newer test tools like dexp, clang-query, c-index-test
             # need libedit.so.*, libxml2.so.*, etc. in stage2/lib.
             self._install_lib_deps(self.output_dir / 'lib')
-            checks = ['check-clang', 'check-llvm', 'check-clang-tools'] + ['check-cxx-' + triple for triple in sorted(self.runtimes_triples)]
+            # musl cannot run check-cxx yet
+            cxx_triples = [triple for triple in sorted(self.runtimes_triples) if 'linux-musl' not in triple]
+            checks = ['check-clang', 'check-llvm', 'check-clang-tools'] + ['check-cxx-' + triple for triple in cxx_triples]
             # clangd tests fail intermittently. https://github.com/llvm/llvm-project/issues/64964
             check_env = {'LIT_FILTER_OUT': 'clangd'}
-            if hosts.build_host().is_darwin: # b/298489611
-                check_env = {'LIT_FILTER_OUT': 'clangd|clang-tidy|xpc|tools\/lto|LineEditor'}
+            if hosts.build_host().is_darwin:
+                # b/298489611, b/326166097
+                check_env = {'LIT_FILTER_OUT': 'clangd|clang-tidy|xpc|tools\/lto|LineEditor|Interpreter|ClangIncludeCleaner|ClangPseudo'}
+                checks.remove('check-llvm')
             self._ninja(checks, check_env)

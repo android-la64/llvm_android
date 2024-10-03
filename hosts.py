@@ -78,6 +78,7 @@ class Arch(enum.Enum):
     I386 = 'i386'
     X86_64 = 'x86_64'
     RISCV64 = 'riscv64'
+    LoongArch64 = 'loongarch64'
 
     @property
     def llvm_arch(self) -> str:
@@ -87,7 +88,8 @@ class Arch(enum.Enum):
             Arch.AARCH64: 'aarch64',
             Arch.I386: 'i686',
             Arch.X86_64: 'x86_64',
-            Arch.RISCV64: 'riscv64'
+            Arch.RISCV64: 'riscv64',
+            Arch.LoongArch64: 'loongarch64'
         }[self]
 
 

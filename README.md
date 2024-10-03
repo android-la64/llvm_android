@@ -2,10 +2,10 @@ Android Clang/LLVM Toolchain
 ============================
 
 For the latest version of this doc, please make sure to visit:
-[Android Clang/LLVM Toolchain Readme Doc](https://android.googlesource.com/toolchain/llvm_android/+/master/README.md)
+[Android Clang/LLVM Toolchain Readme Doc](https://android.googlesource.com/toolchain/llvm_android/+/main/README.md)
 
 You can also visit the
-[Android Clang/LLVM Prebuilts Readme Doc](https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+/master/README.md)
+[Android Clang/LLVM Prebuilts Readme Doc](https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+/main/README.md)
 for more information about our prebuilt toolchains (and what versions they are based upon).
 
 Build Instructions
@@ -20,13 +20,38 @@ $ python toolchain/llvm_android/build.py
 
 The built toolchain will be installed to `out/install/$HOST/clang-dev`.
 
-If building on Linux, pass `--no-build windows` to `build.py` to skip
-building Clang for Windows.
+#### MLGO
 
-Pass the `--lto` option to `build.py` to build the toolchain with LTO.  LTO is
-enabled in official Android Clang/LLVM prebuilts but the flag is off by default.
-This option only affects the second stage Clang toolchain and not the on-device
-targets (compiler-rt, lldb-server etc).
+The Android LLVM team has an internal docker image with dependencies required to
+build LLVM with MLGO.  External users can create a docker image with this configuration from
+scratch:
+
+```
+# Googlers
+$ toolchain/llvm_android/docker/prod_env.sh
+# Other users
+$ toolchain/llvm_android/docker/test_env.sh
+
+# Build toolchain with mlgo
+$ toolchain/llvm_android/build.py --mlgo
+```
+
+> The default option is `--no-mlgo`, which builds the toolchain without MLGO.
+> Building Android with this toolchain will fail with `Requested regalloc
+> eviction advisor analysis could not be created.`.  Use
+> `m THINLTO_USE_MLGO=false` to bypass this error.
+
+#### Convenience Options
+
+Some common options to `build.py`.  Use `build.py --help` for an updated list
+of convenience options:
+- `--no-build windows` skips building clang for Windows (relevant when building
+on Linux).
+- `--skip-tests` skips running tests in the LLVM projects.
+- `--lto` to build with ThinLTO.  LTO is enabled in official Android Clang/LLVM
+prebuilts but the flag is off by default.  This option only affects the second
+stage Clang toolchain and not the on-device targets (compiler-rt, lldb-server etc).
+- `--no-mlgo` to disable MLGO support (see [MLGO](#MLGO)).
 
 If you have an additional llvm tree built and present in your `$PATH`, then
 `build.py` might fail during the Windows build of libcxxabi with the error
@@ -210,7 +235,7 @@ by RBE.
 ### Step 7: Switch to the new compiler
 
 All places need to switch to the new compiler are listed in
-https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+/master/README.md.
+https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+/main/README.md.
 
 The updates in the kernel and NDK are done separately.
 

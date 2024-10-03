@@ -52,6 +52,8 @@ BIONIC_KERNEL_HEADERS: Path = ANDROID_DIR / 'bionic' / 'libc' / 'kernel' / 'uapi
 GO_BIN_PATH: Path = PREBUILTS_DIR / 'go' / hosts.build_host().os_tag / 'bin'
 CMAKE_BIN_PATH: Path = PREBUILTS_DIR / 'cmake' / hosts.build_host().os_tag / 'bin' / 'cmake'
 BUILD_TOOLS_DIR: Path = PREBUILTS_DIR / 'build-tools'
+BISON_BIN_PATH: Path = BUILD_TOOLS_DIR / hosts.build_host().os_tag / 'bin' / 'bison'
+M4_BIN_PATH: Path = BUILD_TOOLS_DIR / hosts.build_host().os_tag / 'bin' / 'm4'
 MAKE_BIN_PATH: Path = BUILD_TOOLS_DIR / hosts.build_host().os_tag / 'bin' / 'make'
 # Use the musl version of ninja on Linux, it is statically linked and avoids
 # problems with LD_LIBRARY_PATH causing ninja to use the wrong libc++.so.
@@ -64,9 +66,11 @@ SWIG_SRC_DIR: Path = EXTERNAL_DIR / 'swig'
 XZ_SRC_DIR: Path = TOOLCHAIN_DIR / 'xz'
 ZSTD_SRC_DIR: Path = EXTERNAL_DIR / 'zstd'
 
-NDK_BASE: Path = TOOLCHAIN_DIR / 'prebuilts' /'ndk' / constants.NDK_VERSION
+NDK_BASE: Path = TOOLCHAIN_DIR / 'prebuilts' / 'ndk' / 'releases' / constants.NDK_VERSION
 
 RISCV64_ANDROID_SYSROOT: Path = TOOLCHAIN_DIR / 'prebuilts' / 'sysroot' / 'platform' / 'riscv64-linux-android'
+
+LOONGARCH64_ANDROID_SYSROOT: Path = TOOLCHAIN_DIR / 'prebuilts' / 'sysroot' / 'platform' / 'loongarch64-linux-android'
 
 GCC_ROOT: Path = PREBUILTS_DIR / 'gcc' / hosts.build_host().os_tag
 GO_ROOT: Path = PREBUILTS_DIR / 'go' / hosts.build_host().os_tag
@@ -85,9 +89,6 @@ KYTHE_OUTPUT_DIR = OUT_DIR / 'kythe-files'
 KYTHE_VNAMES_JSON = SCRIPTS_DIR / 'kythe_vnames.json'
 
 ORDERFILE_SCRIPTS_DIR: Path = TOOLCHAIN_DIR / "llvm_android" / "orderfiles" / "scripts"
-
-_PYTHON_VER = '3.10'
-_PYTHON_VER_SHORT = _PYTHON_VER.replace('.', '')
 
 def pgo_profdata_filename() -> str:
     svn_revision = android_version.get_svn_revision_number()
@@ -136,6 +137,22 @@ def get_package_install_path(host: hosts.Host, package_name) -> Path:
 def get_python_dir(host: hosts.Host) -> Path:
     """Returns the path to python for a host."""
     return PREBUILTS_DIR / 'python' / host.os_tag
+
+
+def determine_python_ver() -> str:
+    python_path = get_python_dir(hosts.Host.Linux)
+    versions = list(python_path.glob("include/python*"))
+    if len(versions) != 1:
+        raise RuntimeError(
+            "Could not determine unique Python version from "
+            f"{python_path / 'include'}"
+        )
+    return versions[0].name.removeprefix("python")
+
+
+_PYTHON_VER = determine_python_ver()
+_PYTHON_VER_SHORT = _PYTHON_VER.replace('.', '')
+
 
 def get_python_executable(host: hosts.Host) -> Path:
     """Returns the path to python executable for a host."""

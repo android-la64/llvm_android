@@ -115,6 +115,11 @@ def parse_args():
         nargs='?',
         help='Directory of a pre-packaged (.tar.xz) bootstrap (stage-1) Clang. '
         'Clang extracted from the package will be used for building a full toolchain.')
+    clang_group.add_argument(
+        '--clang-kokoro-build-id',
+        nargs='?',
+        help='Kokoro TOT Clang build ID'
+        'Clang pulled from that build will be used.')
 
     parser.add_argument(
         '-k',
@@ -135,6 +140,11 @@ def parse_args():
         action='store_true',
         default=False,
         help='Build default targets only.')
+    parser.add_argument(
+        '--no-mlgo',
+        action='store_true',
+        default=False,
+        help='Build without mlgo.')
     parser.add_argument(
         '--skip-tests',
         action='store_true',
@@ -199,9 +209,6 @@ def parse_args():
         help='Build BOLT instrumented compiler and gather profiles')
 
     args = parser.parse_args()
-    if args.clang_path and args.clang_package_path:
-        parser.error('Only one of --clang-path and --clang-package-path must'
-                     'be specified')
     if args.build_only and not args.target:
         parser.error('Build target is not specified in build only mode.')
 
@@ -246,6 +253,7 @@ def extract_clang_version(clang_install: Path) -> version.Version:
 def build_target(android_base: Path, clang_version: version.Version,
                  target: str, modules: List[str],
                  max_jobs: int, enable_fallback: bool, with_tidy: bool,
+                 no_mlgo: bool,
                  profiler: Optional[ProfileHandler]=None) -> None:
     jobs = '-j{}'.format(max(1, min(max_jobs, multiprocessing.cpu_count())))
     try:
@@ -287,6 +295,8 @@ def build_target(android_base: Path, clang_version: version.Version,
     env['LLVM_PREBUILTS_VERSION'] = 'clang-dev'
     env['LLVM_RELEASE_VERSION'] = clang_version.major_version()
     env['LLVM_NEXT'] = 'true'
+    if no_mlgo:
+        env['THINLTO_USE_MLGO'] = 'false'
 
     if with_tidy:
         env['WITH_TIDY'] = '1'
@@ -315,7 +325,7 @@ def build_target(android_base: Path, clang_version: version.Version,
 
 def test_device(android_base: Path, clang_version: version.Version, device: List[str],
                 modules: List[str], max_jobs: int, clean_output: str, flashall_path: Optional[Path],
-                enable_fallback: bool, with_tidy: bool) -> bool:
+                enable_fallback: bool, with_tidy: bool, no_mlgo: bool) -> bool:
     [label, target] = device[-1].split(':')
     # If current device is not connected correctly we will just skip it.
     if label != 'device':
@@ -325,7 +335,7 @@ def test_device(android_base: Path, clang_version: version.Version, device: List
         target = 'aosp_' + target + '-eng'
     try:
         build_target(android_base, clang_version, target, modules, max_jobs,
-                     enable_fallback, with_tidy)
+                     enable_fallback, with_tidy, no_mlgo)
         if flashall_path is None:
             bin_path = (android_base / 'out' / 'host' /
                         hosts.build_host().os_tag / 'bin')
@@ -376,6 +386,27 @@ def extract_packaged_clang(package_path: Path) -> Path:
     return clang_path
 
 
+def fetch_kokoro_prebuilt(build_id: str) -> Path:
+    # Extract package to $OUT_DIR/extracted
+    extract_dir = paths.OUT_DIR / 'extracted'
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    utils.check_call([
+        paths.SCRIPTS_DIR / "fetch_kokoro_prebuilts.py", "--build_id", build_id,
+        extract_dir
+    ])
+
+    return extract_dir / f'clang-{build_id}'
+
+
+def is_clang_built_with_mlgo(clang_dir: Path):
+    clang = clang_dir / 'bin' / 'clang'
+    output = utils.check_output([str(clang), '--version'])
+    return '+mlgo' in output
+
+
 def main():
     logging.basicConfig(level=logging.DEBUG)
 
@@ -387,8 +418,12 @@ def main():
         clang_path = Path(args.clang_path)
     elif args.clang_package_path is not None:
         clang_path = extract_packaged_clang(Path(args.clang_package_path))
+    elif args.clang_kokoro_build_id is not None:
+        clang_path = fetch_kokoro_prebuilt(args.clang_kokoro_build_id)
     else:
-        cmd = [paths.SCRIPTS_DIR / 'build.py', '--no-build=windows,lldb', '--mlgo']
+        cmd = [paths.SCRIPTS_DIR / 'build.py', '--no-build=windows,lldb']
+        if not args.no_mlgo:
+            cmd.append('--mlgo')
         if args.clang_bootstrap_path:
             cmd.append(f'--bootstrap-use={args.clang_bootstrap_path}')
         if args.profile:
@@ -407,6 +442,8 @@ def main():
     clang_version = extract_clang_version(clang_path)
     copy_clang(Path(args.android_path), clang_path)
 
+    no_mlgo = not is_clang_built_with_mlgo(clang_path)
+
     if args.build_only:
         if args.profile:
             profiler = PgoProfileHandler()
@@ -417,7 +454,7 @@ def main():
 
         build_target(Path(args.android_path), clang_version, args.target,
                      modules, args.jobs,
-                     args.enable_fallback, args.with_tidy, profiler)
+                     args.enable_fallback, args.with_tidy, no_mlgo, profiler)
 
         if profiler is not None:
             profiler.mergeProfiles()
@@ -430,7 +467,7 @@ def main():
             result = test_device(Path(args.android_path), clang_version, device,
                                  modules, args.jobs, args.clean_built_target,
                                  Path(args.flashall_path) if args.flashall_path else None,
-                                 args.enable_fallback, args.with_tidy)
+                                 args.enable_fallback, args.with_tidy, no_mlgo)
             if not result and not args.keep_going:
                 break
 

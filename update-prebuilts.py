@@ -19,6 +19,8 @@
 """Update the prebuilt clang from the build server."""
 
 import argparse
+import contextlib
+import glob
 import inspect
 import logging
 import os
@@ -29,6 +31,9 @@ import sys
 import utils
 
 import paths
+
+PGO_PROFILE_PATTERN = 'pgo-*.tar.xz'
+BOLT_PROFILE_PATTERN = 'bolt-*.tar.xz'
 
 def logger():
     """Returns the module level logger."""
@@ -67,6 +72,13 @@ class ArgParser(argparse.ArgumentParser):
             action='store_true',
             default=False,
             help='Skip the cleanup, and leave intermediate files')
+
+        self.add_argument(
+            '--skip-update-profiles',
+            '-sp',
+            action='store_true',
+            default=False,
+            help='Skip updating PGO and BOLT profiles')
 
         self.add_argument(
             '--overwrite', action='store_true',
@@ -200,6 +212,8 @@ def update_clang(host, build_number, use_current_branch, download_dir, bug,
     # Handle legacy versions of packages (like those from aosp/llvm-r365631).
     if not os.path.exists(package) and host == 'windows-x86':
         package = f'{download_dir}/clang-{build_number}-windows-x86-64.tar.xz'
+
+    build_info_file = f'{download_dir}/BUILD_INFO-{host}'
     manifest_file = f'{download_dir}/{manifest}'
 
     utils.extract_tarball(prebuilt_dir, package)
@@ -223,17 +237,20 @@ def update_clang(host, build_number, use_current_branch, download_dir, bug,
             "*/lib/libclang.so*",
             "*/lib/*/libc++.so*",
             "*/lib/libc_musl.so",
+            "*/lib/aarch64-unknown-linux-musl/libc++.a",
+            "*/lib/aarch64-unknown-linux-musl/libc++abi.a",
             "*/lib/x86_64-unknown-linux-musl/libc++.a",
             "*/lib/x86_64-unknown-linux-musl/libc++abi.a",
             ])
         install_clang_directory(extract_subdir, musl_install_subdir, overwrite)
 
-        x86_64_linux_musl_lib_dir = (Path(install_subdir) / 'lib' / 'clang' / clang_version_major / 'lib'
-                                     / 'x86_64-unknown-linux-musl')
-        shutil.move(Path(musl_install_subdir) / 'lib' / 'x86_64-unknown-linux-musl' / 'libc++.a',
-                    x86_64_linux_musl_lib_dir)
-        shutil.move(Path(musl_install_subdir) / 'lib' / 'x86_64-unknown-linux-musl' / 'libc++abi.a',
-                    x86_64_linux_musl_lib_dir)
+        for triple in ('aarch64-unknown-linux-musl', 'x86_64-unknown-linux-musl'):
+            # Move archives.
+            src_dir = Path(musl_install_subdir) / 'lib' / triple
+            dest_dir = Path(install_subdir) / 'lib' / 'clang' / clang_version_major / 'lib' / triple
+            dest_dir.mkdir(exist_ok=True)  # The x86_64 triple will already exist.
+            for name in ('libc++.a', 'libc++abi.a'):
+                shutil.move(src_dir / name, dest_dir / name)
 
         with open(paths.KLEAF_VERSIONS_BZL) as f:
             kleaf_versions_lines = f.read().splitlines()
@@ -257,6 +274,7 @@ def update_clang(host, build_number, use_current_branch, download_dir, bug,
         if not validity_check(host, install_subdir, clang_version_major):
             sys.exit(1)
 
+    shutil.copy(build_info_file, str(prebuilt_dir / install_subdir / 'BUILD_INFO'))
     shutil.copy(manifest_file, str(prebuilt_dir / install_subdir))
 
     utils.check_call(['git', 'add', install_subdir])
@@ -295,6 +313,30 @@ def install_clang_directory(extract_subdir: str, install_subdir: str, overwrite:
     os.rename(extract_subdir, install_subdir)
 
 
+def update_profiles(download_dir, build_number, bug):
+    profiles_dir = paths.PREBUILTS_DIR / 'clang' / 'host' / 'linux-x86' / 'profiles'
+
+    with contextlib.chdir(profiles_dir):
+        # First, delete the old profiles.
+        for f in glob.glob(PGO_PROFILE_PATTERN):
+            os.remove(f)
+        for f in glob.glob(BOLT_PROFILE_PATTERN):
+            os.remove(f)
+
+        # Replace with the downloaded new profiles.
+        shutil.copy(glob.glob(f'{download_dir}/{PGO_PROFILE_PATTERN}')[0], '.')
+        shutil.copy(glob.glob(f'{download_dir}/{BOLT_PROFILE_PATTERN}')[0], '.')
+
+        utils.check_call(['git', 'add', '.'])
+        message_lines = [f'Check in profiles from build {build_number}']
+        if bug is not None:
+            message_lines.append('')
+            message_lines.append(f'Bug: {format_bug(bug)}')
+        message_lines.append('Test: N/A')
+        message = '\n'.join(message_lines)
+        utils.check_call(['git', 'commit', '-m', message])
+
+
 def main():
     args = ArgParser().parse_args()
     logging.basicConfig(level=logging.DEBUG)
@@ -320,6 +362,8 @@ def main():
     targets = [targets_map[h] for h  in hosts]
     if 'linux-x86' in hosts:
         targets.append('linux_musl')
+
+    build_info = 'BUILD_INFO'
     clang_pattern = 'clang-*.tar.xz'
     manifest = f'manifest_{args.build}.xml'
 
@@ -340,13 +384,24 @@ def main():
     try:
         if do_fetch:
             fetch_artifact(branch, targets[0], args.build, manifest)
+            for host in hosts:
+                target = targets_map[host]
+                fetch_artifact(branch, target, args.build, build_info)
+                os.rename(f'{download_dir}/{build_info}', f'{download_dir}/{build_info}-{host}')
             for target in targets:
                 fetch_artifact(branch, target, args.build, clang_pattern)
+
+            if not args.skip_update_profiles and 'linux-x86' in hosts:
+                fetch_artifact(branch, 'linux', args.build, PGO_PROFILE_PATTERN)
+                fetch_artifact(branch, 'linux', args.build, BOLT_PROFILE_PATTERN)
 
         for host in hosts:
             update_clang(host, args.build, args.use_current_branch,
                          download_dir, args.bug, manifest, args.overwrite,
                          not args.no_validity_check, is_testing)
+
+        if not args.skip_update_profiles and 'linux-x86' in hosts:
+            update_profiles(download_dir, args.build, args.bug)
 
         if args.repo_upload:
             topic = f'clang-prebuilt-{args.build}'
